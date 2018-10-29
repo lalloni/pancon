@@ -28,6 +28,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -35,35 +36,46 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-const (
-	yamlFormat = "yaml"
-	jsonFormat = "json"
-	tomlFormat = "toml"
-)
-
-var formats = []string{yamlFormat, jsonFormat, tomlFormat}
-
-type Coder struct {
-	Encode func(w io.Writer, v interface{}) error
-	Decode func(v interface{}, r io.Reader) error
-}
-
-var coders = map[string]*Coder{
-	yamlFormat: &Coder{Encode: writeYAML, Decode: readYAML},
-	jsonFormat: &Coder{Encode: writeJSON, Decode: readJSON},
-	tomlFormat: &Coder{Encode: writeTOML, Decode: readTOML},
-}
-
 var help = `Simple config/markup converter.
-
-Can understand ` + strings.Join(formats, ", ") + ` formats.
 
 Will read from stdin if input is unspecified or "-".
 
 Will write to stdout if output is unspecified or "-".
 
-Can be used as a pipe filter if both input and output are unspecified or "-".
-`
+Can be used as a pipe filter if both input and output are unspecified or "-".`
+
+type Coder struct {
+	Format string
+	Decode func(v interface{}, r io.Reader) error
+	Encode func(w io.Writer, v interface{}) error
+}
+
+var coders = []*Coder{
+	{"yaml", readYAML, writeYAML},
+	{"json", readJSON, writeJSON},
+	{"toml", readTOML, writeTOML},
+}
+
+var formats []string
+
+func init() {
+	decoders := []string{}
+	encoders := []string{}
+	for _, coder := range coders {
+		formats = append(formats, coder.Format)
+		if coder.Encode != nil {
+			encoders = append(encoders, coder.Format)
+		}
+		if coder.Decode != nil {
+			decoders = append(decoders, coder.Format)
+		}
+	}
+	sort.Strings(formats)
+	sort.Strings(encoders)
+	sort.Strings(decoders)
+	help = help + "\n\nSupported formats for input decoding: " + strings.Join(decoders, " ")
+	help = help + "\n\nSupported formats for output encoding: " + strings.Join(encoders, " ")
+}
 
 func main() {
 
@@ -78,9 +90,15 @@ func main() {
 
 	incoder, err := coder(*inputFile, *inputFormat, "reading from stdin")
 	app.FatalIfError(err, "input")
+	if incoder.Decode == nil {
+		app.Fatalf("input format %s not supported for decoding", incoder.Format)
+	}
 
 	outcoder, err := coder(*outputFile, *outputFormat, "writing to stdout")
 	app.FatalIfError(err, "output")
+	if outcoder.Decode == nil {
+		app.Fatalf("output format %s not supported for encoding", outcoder.Format)
+	}
 
 	infile, incloser, err := file(*inputFile, *inputFormat, os.Stdin, os.Open)
 	app.FatalIfError(err, "opening input")
@@ -90,7 +108,7 @@ func main() {
 	app.FatalIfError(err, "opening output")
 	defer func() { app.FatalIfError(outcloser(), "closing output file") }()
 
-	data := make(map[string]interface{})
+	data := map[string]interface{}{}
 
 	app.FatalIfError(incoder.Decode(&data, infile), "decoding")
 	app.FatalIfError(outcoder.Encode(outfile, &data), "encoding")
@@ -120,7 +138,7 @@ func coder(file, format, action string) (*Coder, error) {
 		}
 		format = f
 	}
-	if c, ok := coders[format]; ok {
+	if c := coderFor(format); c != nil {
 		return c, nil
 	}
 	return nil, fmt.Errorf("unknown input format %s", format)
@@ -133,17 +151,26 @@ func guessformat(file string) (string, error) {
 		// normalize some commonly seen file "extensions"
 		switch e {
 		case "js":
-			e = jsonFormat
+			e = "json"
 		case "yml":
-			e = yamlFormat
+			e = "yaml"
 		case "tml":
-			e = tomlFormat
+			e = "toml"
 		}
 	}
-	if _, ok := coders[e]; ok {
+	if coderFor(e) != nil {
 		return e, nil
 	}
 	return "", fmt.Errorf("can not detect format from file %s extension", file)
+}
+
+func coderFor(format string) *Coder {
+	for _, coder := range coders {
+		if coder.Format == format {
+			return coder
+		}
+	}
+	return nil
 }
 
 func readTOML(v interface{}, r io.Reader) error {
